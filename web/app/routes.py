@@ -1,11 +1,35 @@
-from app import app, db, queue_client
+from app import app, db
 from datetime import datetime
 from app.models import Attendee, Conference, Notification
-from flask import render_template, session, request, redirect, url_for, flash, make_response, session
-from azure.servicebus import Message
+from flask import render_template, session, request, redirect, url_for, flash, make_response
+from azure.servicebus import ServiceBusClient, ServiceBusMessage
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 import logging
+
+
+def enqueue_notification(notification_id: int) -> None:
+    conn_str = app.config.get("SERVICE_BUS_CONNECTION_STRING")
+    queue_name = app.config.get("SERVICE_BUS_QUEUE_NAME")
+
+    if not conn_str or not queue_name:
+        raise RuntimeError("Service Bus config missing: SERVICE_BUS_CONNECTION_STRING / SERVICE_BUS_QUEUE_NAME")
+
+    # # 发送 notification_id（通常用字符串/JSON；这里先用最简单字符串）
+    # msg = ServiceBusMessage(str(notification_id))
+    #
+    # with ServiceBusClient.from_connection_string(conn_str) as client:
+    #     with client.get_queue_sender(queue_name) as sender:
+    #         sender.send_messages(msg)
+
+    try:
+        enqueue_notification(notification.id)
+    except Exception:
+        logging.exception("Failed to enqueue notification")
+        notification.status = f"Failed to enqueue notification {notification.id}"
+        db.session.commit()
+        return render_template('notification.html')
+
 
 @app.route('/')
 def index():
@@ -32,8 +56,9 @@ def registration():
             db.session.commit()
             session['message'] = 'Thank you, {} {}, for registering!'.format(attendee.first_name, attendee.last_name)
             return redirect('/Registration')
-        except:
-            logging.error('Error occured while saving your information')
+        except Exception:
+            logging.exception('Error occured while saving your information')
+            return render_template('registration.html')
 
     else:
         if 'message' in session:
@@ -41,7 +66,8 @@ def registration():
             session.pop('message', None)
             return render_template('registration.html', message=message)
         else:
-             return render_template('registration.html')
+            return render_template('registration.html')
+
 
 @app.route('/Attendees')
 def attendees():
@@ -53,6 +79,7 @@ def attendees():
 def notifications():
     notifications = Notification.query.order_by(Notification.id).all()
     return render_template('notifications.html', notifications=notifications)
+
 
 @app.route('/Notification', methods=['POST', 'GET'])
 def notification():
@@ -67,41 +94,31 @@ def notification():
             db.session.add(notification)
             db.session.commit()
 
-            ##################################################
-            ## TODO: Refactor This logic into an Azure Function
-            ## Code below will be replaced by a message queue
-            #################################################
-            attendees = Attendee.query.all()
+            # 关键：把 notification.id 推到队列里（异步处理）
+            enqueue_notification(notification.id)
 
-            for attendee in attendees:
-                subject = '{}: {}'.format(attendee.first_name, notification.subject)
-                send_email(attendee.email, subject, notification.message)
-
-            notification.completed_date = datetime.utcnow()
-            notification.status = 'Notified {} attendees'.format(len(attendees))
+            # 可选：你也可以在这里把 status 改成 “Queued”
+            notification.status = f"Queued notification {notification.id}"
             db.session.commit()
-            # TODO Call servicebus queue_client to enqueue notification ID
-
-            #################################################
-            ## END of TODO
-            #################################################
 
             return redirect('/Notifications')
-        except :
-            logging.error('log unable to save notification')
+        except Exception:
+            logging.exception('log unable to save notification')
+            return render_template('notification.html')
 
     else:
         return render_template('notification.html')
 
 
-
 def send_email(email, subject, body):
-    if not app.config.get('SENDGRID_API_KEY'):
+    # 你这里的逻辑目前是反的：if not key -> 还去用 key
+    # 正常应该是：有 key 才发送
+    if app.config.get('SENDGRID_API_KEY'):
         message = Mail(
             from_email=app.config.get('ADMIN_EMAIL_ADDRESS'),
             to_emails=email,
             subject=subject,
-            plain_text_content=body)
-
+            plain_text_content=body
+        )
         sg = SendGridAPIClient(app.config.get('SENDGRID_API_KEY'))
         sg.send(message)
