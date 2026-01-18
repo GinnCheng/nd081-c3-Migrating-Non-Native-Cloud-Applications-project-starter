@@ -60,17 +60,23 @@ def _send_email(to_email: str, subject: str, body: str) -> None:
     api_key = os.environ.get("SENDGRID_API_KEY", "")
     from_email = os.environ.get("ADMIN_EMAIL_ADDRESS", "info@techconf.com")
 
+    # 没有 key：直接跳过，不要报错
     if not api_key:
-        logging.warning("SENDGRID_API_KEY not set. Skipping email to %s", to_email)
+        logging.info("SENDGRID_API_KEY not set. Skipping email to %s", to_email)
         return
 
-    message = Mail(
-        from_email=from_email,
-        to_emails=to_email,
-        subject=subject,
-        plain_text_content=body,
-    )
-    SendGridAPIClient(api_key).send(message)
+    try:
+        message = Mail(
+            from_email=from_email,
+            to_emails=to_email,
+            subject=subject,
+            plain_text_content=body,
+        )
+        SendGridAPIClient(api_key).send(message)
+    except Exception as e:
+        # 关键：吞掉异常，让函数继续跑完并更新 DB 状态
+        logging.exception("SendGrid send failed. Skipping email to %s. Error: %s", to_email, e)
+        return
 
 
 def _fetch_one(cur, query: str, params: Tuple[Any, ...]) -> Optional[Dict[str, Any]]:
