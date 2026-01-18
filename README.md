@@ -61,11 +61,26 @@ You will need to install the following locally:
 ## Monthly Cost Analysis
 Complete a month cost analysis of each Azure resource to give an estimate total cost using the table below:
 
-| Azure Resource | Service Tier | Monthly Cost |
-| ------------ | ------------ | ------------ |
-| *Azure Postgres Database* |     |              |
-| *Azure Service Bus*   |         |              |
-| ...                   |         |              |
+### Monthly Cost Analysis (Estimate)
+
+| Azure Resource | Tier / SKU | Estimated Monthly Cost | Usage Notes |
+|---|---:|---:|---|
+| Azure App Service (Web App) | F1 (Linux) | ~A$0 / month (region-dependent) | Hosts the Flask web application. Always-on web tier. |
+| Azure Functions (Function App) | Functions v4 (Plan depends) | Varies (plan-based) | Runs the Service Bus-triggered worker to process notifications and update DB status. |
+| Azure Database for PostgreSQL | Flexible Server Burstable B1ms (1 vCore, 2 GiB) + storage | Varies (compute + storage) | Stores attendees and notifications. SSL required. Storage size in this project ~32 GiB. |
+| Azure Service Bus | Standard | Base charge ~0.0135/hour (~$9.86/month USD) + operations | Queue used for decoupling web request from notification processing. First 13M ops/month included. |
+| Azure Storage Account | Standard_LRS | Small (typically a few dollars or less for this project) | Required by Azure Functions for internal storage (logs/leases/checkpoints). |
+
+Notes: Costs vary by region and currency. Use Azure Pricing Calculator for exact estimates.
 
 ## Architecture Explanation
-This is a placeholder section where you can provide an explanation and reasoning for your architecture selection for both the Azure Web App and Azure Function.
+
+This project migrates a Flask-based conference registration web application to Azure using a decoupled, event-driven design.
+
+The web application is hosted on Azure App Service (Web App). It provides the UI for registration and for creating email notifications. When a user submits a new notification, the web app writes the notification record to Azure Database for PostgreSQL and then publishes the notification ID to an Azure Service Bus queue.
+
+Azure Service Bus acts as a reliable message broker between the web tier and the background processing tier. By queueing only the notification ID, the web app avoids long-running work during the HTTP request and remains responsive.
+
+An Azure Function is subscribed to the Service Bus queue via a Service Bus trigger. When a message arrives, the function reads the notification_id from the message, queries PostgreSQL (via psycopg2) to retrieve the notification content and the attendee list, and then performs the notification processing. After processing, the function updates the notification status in PostgreSQL (for example, “Notified X attendees”) and records the completed timestamp.
+
+This architecture improves scalability and reliability by separating user-facing requests from background processing. The web app can scale independently from the worker function, and Service Bus provides buffering/retry semantics in case the worker is temporarily unavailable.

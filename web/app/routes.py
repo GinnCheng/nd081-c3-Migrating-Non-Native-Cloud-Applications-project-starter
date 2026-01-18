@@ -1,7 +1,7 @@
 from app import app, db
 from datetime import datetime
 from app.models import Attendee, Conference, Notification
-from flask import render_template, session, request, redirect, url_for, flash, make_response
+from flask import render_template, session, request, redirect
 from azure.servicebus import ServiceBusClient, ServiceBusMessage
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
@@ -15,20 +15,11 @@ def enqueue_notification(notification_id: int) -> None:
     if not conn_str or not queue_name:
         raise RuntimeError("Service Bus config missing: SERVICE_BUS_CONNECTION_STRING / SERVICE_BUS_QUEUE_NAME")
 
-    # # 发送 notification_id（通常用字符串/JSON；这里先用最简单字符串）
-    # msg = ServiceBusMessage(str(notification_id))
-    #
-    # with ServiceBusClient.from_connection_string(conn_str) as client:
-    #     with client.get_queue_sender(queue_name) as sender:
-    #         sender.send_messages(msg)
+    msg = ServiceBusMessage(str(notification_id))
 
-    try:
-        enqueue_notification(notification.id)
-    except Exception:
-        logging.exception("Failed to enqueue notification")
-        notification.status = f"Failed to enqueue notification {notification.id}"
-        db.session.commit()
-        return render_template('notification.html')
+    with ServiceBusClient.from_connection_string(conn_str) as client:
+        with client.get_queue_sender(queue_name) as sender:
+            sender.send_messages(msg)
 
 
 @app.route('/')
@@ -84,26 +75,33 @@ def notifications():
 @app.route('/Notification', methods=['POST', 'GET'])
 def notification():
     if request.method == 'POST':
-        notification = Notification()
-        notification.message = request.form['message']
-        notification.subject = request.form['subject']
-        notification.status = 'Notifications submitted'
-        notification.submitted_date = datetime.utcnow()
+        n = Notification()
+        n.message = request.form['message']
+        n.subject = request.form['subject']
+        n.status = 'Notifications submitted'
+        n.submitted_date = datetime.utcnow()
 
         try:
-            db.session.add(notification)
+            # 1) 先保存拿到 id
+            db.session.add(n)
             db.session.commit()
 
-            # 关键：把 notification.id 推到队列里（异步处理）
-            enqueue_notification(notification.id)
-
-            # 可选：你也可以在这里把 status 改成 “Queued”
-            notification.status = f"Queued notification {notification.id}"
+            # 2) 立刻写入 queued（在 enqueue 之前），避免被 function 更新后又覆盖
+            n.status = f"Queued notification {n.id}"
             db.session.commit()
+
+            # 3) enqueue（这之后不要再改 status）
+            enqueue_notification(n.id)
 
             return redirect('/Notifications')
+
         except Exception:
-            logging.exception('log unable to save notification')
+            logging.exception("Failed to save/enqueue notification")
+            try:
+                n.status = f"Failed to enqueue notification {getattr(n, 'id', '')}".strip()
+                db.session.commit()
+            except Exception:
+                pass
             return render_template('notification.html')
 
     else:
@@ -111,8 +109,6 @@ def notification():
 
 
 def send_email(email, subject, body):
-    # 你这里的逻辑目前是反的：if not key -> 还去用 key
-    # 正常应该是：有 key 才发送
     if app.config.get('SENDGRID_API_KEY'):
         message = Mail(
             from_email=app.config.get('ADMIN_EMAIL_ADDRESS'),
